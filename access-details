@@ -3,9 +3,9 @@
 # Copyright (C) 2026 Keith Gardner, aSolution.company
 # Website: https://asolution.company/
 #
-# This program is free software; you can redistribute it and/or modify
+# This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
+# the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 #
 # This program is distributed in the hope that it will be useful,
@@ -13,41 +13,63 @@
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
 #
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write to the Free Software Foundation, Inc.,
-# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
 # access-details
-# Show up to 100 of the most recent access-log entries matching a text string.
+# Show up to N of the most recent access-log entries matching a text string.
 # Matches only against the raw log line and outputs date/time, user agent, URL,
 # response code, remote IP, and resolved hostname.
 # Reads from ./access.log by default, or all rotated access.log files with --all.
-# Usage: ./access-details [--all] <match_string>
+# Usage: ./access-details [--all] [-n N] <match_string>
 # Example: ./access-details 203.0.113.10
-# Example: ./access-details semantic-visions
+# Example: ./access-details -n 50 semantic-visions
 # Example: ./access-details --all semantic
 
 set -euo pipefail
 
 ACCESS_LOG="./access.log"
 USE_ALL=false
+MAX_ENTRIES=100
 MATCH_STRING=""
 LOG_FILES=()
 
-if [ "${1:-}" = "--all" ]; then
-    USE_ALL=true
-    shift
-fi
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --all)
+            USE_ALL=true
+            shift
+            ;;
+        -n)
+            if [ "$#" -lt 2 ]; then
+                echo "Error: -n requires a number"
+                exit 1
+            fi
+            MAX_ENTRIES="$2"
+            shift 2
+            ;;
+        *)
+            if [ -n "$MATCH_STRING" ]; then
+                echo "Usage: $0 [--all] [-n N] <match_string>"
+                exit 1
+            fi
+            MATCH_STRING="$1"
+            shift
+            ;;
+    esac
+done
 
-if [ "$#" -ne 1 ]; then
-    echo "Usage: $0 [--all] <match_string>"
+if [ -z "$MATCH_STRING" ]; then
+    echo "Usage: $0 [--all] [-n N] <match_string>"
     echo "Example: $0 203.0.113.10"
-    echo "Example: $0 semantic-visions"
-    echo "Example: $0 --all semantic"
+    echo "Example: $0 -n 50 semantic-visions"
     exit 1
 fi
 
-MATCH_STRING="$1"
+if ! [[ "$MAX_ENTRIES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: -n must be a positive integer"
+    exit 1
+fi
 
 resolve_log_files() {
     local match=""
@@ -73,16 +95,40 @@ resolve_log_files() {
     fi
 }
 
+# Timeout in seconds for DNS lookups (avoid stalling on slow/unresponsive resolvers)
+DNS_TIMEOUT=2
+
 resolve_hostname() {
     local ip="$1"
     local host_name=""
+    local run=""
+    local out=""
+    local exit_status=0
+
+    if command -v timeout >/dev/null 2>&1; then
+        run() { timeout "$DNS_TIMEOUT" "$@"; }
+    else
+        run() { "$@"; }
+    fi
 
     if command -v host >/dev/null 2>&1; then
-        host_name=$(host "$ip" 2>/dev/null | awk -F' pointer ' '/domain name pointer/ {sub(/\.$/, "", $2); print $2; exit}')
+        out=$(run host "$ip" 2>/dev/null)
+        exit_status=$?
+        if [ "$exit_status" -eq 124 ]; then
+            host_name="-TIMEOUT-"
+        else
+            host_name=$(echo "$out" | awk -F' pointer ' '/domain name pointer/ {sub(/\.$/, "", $2); print $2; exit}')
+        fi
     fi
 
     if [ -z "$host_name" ] && command -v dig >/dev/null 2>&1; then
-        host_name=$(dig +short -x "$ip" 2>/dev/null | awk 'NF {sub(/\.$/, "", $0); print; exit}')
+        out=$(run dig +short -x "$ip" 2>/dev/null)
+        exit_status=$?
+        if [ "$exit_status" -eq 124 ]; then
+            host_name="-TIMEOUT-"
+        else
+            host_name=$(echo "$out" | awk 'NF {sub(/\.$/, "", $0); print; exit}')
+        fi
     fi
 
     if [ -z "$host_name" ]; then
@@ -144,7 +190,7 @@ while IFS= read -r remote_ip; do
 done < <(awk '{print $1}' "$RAW_MATCHES_FILE" | sort -u) > "$HOST_CACHE_FILE"
 
 awk 'FNR==NR { host[$1] = $2; next } { print $0 "\t" host[$1] }' "$HOST_CACHE_FILE" "$RAW_MATCHES_FILE" \
-    | tail -100 \
+    | tail -n "$MAX_ENTRIES" \
     | while IFS=$'\t' read -r line host_name; do
         parsed_line="$(parse_line "$line")"
         [ -n "$parsed_line" ] || continue
