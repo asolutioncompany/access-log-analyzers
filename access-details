@@ -22,9 +22,9 @@
 # response code, remote IP, and resolved hostname.
 # Reads from ./access.log by default, or all rotated access.log files with --all.
 # Usage: ./access-details [--all] [-n N] <match_string>
-# Example: ./access-details 203.0.113.10
-# Example: ./access-details -n 50 semantic-visions
-# Example: ./access-details --all semantic
+# Example: ./access-details 192.168.0.1
+# Example: ./access-details -n 50 crawler
+# Example: ./access-details --all crawler
 
 set -euo pipefail
 
@@ -61,8 +61,8 @@ done
 
 if [ -z "$MATCH_STRING" ]; then
     echo "Usage: $0 [--all] [-n N] <match_string>"
-    echo "Example: $0 203.0.113.10"
-    echo "Example: $0 -n 50 semantic-visions"
+    echo "Example: $0 192.168.0.1"
+    echo "Example: $0 -n 50 crawler"
     exit 1
 fi
 

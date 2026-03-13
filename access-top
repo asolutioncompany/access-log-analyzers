@@ -24,7 +24,7 @@
 # Example: ./access-top
 # Example: ./access-top -n 50
 # Example: ./access-top --all
-# Example: ./access-top "Googlebot"
+# Example: ./access-top "bot"
 # Example: ./access-top --all -n 200 "/wp-login.php"
 
 set -euo pipefail

@@ -30,7 +30,7 @@ Shows the top N remote hosts by request count from the access log, with reverse 
 ./access-top
 ./access-top -n 50
 ./access-top --all
-./access-top "Googlebot"
+./access-top "bot"
 ./access-top --all -n 200 "/wp-login.php"
 ```
 
@@ -57,8 +57,8 @@ Shows up to N of the most recent log entries that match a string. Output include
 ### Examples
 
 ```bash
-./access-details 203.0.113.10
-./access-details -n 50 semantic-visions
-./access-details --all semantic
+./access-details 192.168.0.1
+./access-details -n 50 crawler
+./access-details --all crawler
 ./access-details --all -n 200 "/wp-admin"
 ```
