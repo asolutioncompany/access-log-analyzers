@@ -20,10 +20,12 @@
 # Show the top N remote hosts from ./access.log, including reverse DNS hostname.
 # Use --all to include rotated access.log files, including .gz files.
 # Optionally filter to only log lines containing a given string.
-# Usage: ./access-top [--all] [-n N | --top N] [filter_string]
+# Use --combine to group resolved domains by last two parts (e.g. x.example.com)
+# and unresolved IPs by first three octets (e.g. 192.168.0.x).
+# Usage: ./access-top [--all] [--combine] [-n N | --top N] [filter_string]
 # Example: ./access-top
 # Example: ./access-top -n 50
-# Example: ./access-top --all
+# Example: ./access-top --all --combine
 # Example: ./access-top "bot"
 # Example: ./access-top --all -n 200 "/wp-login.php"
 
@@ -31,6 +33,7 @@ set -euo pipefail
 
 ACCESS_LOG="./access.log"
 USE_ALL=false
+USE_COMBINE=false
 TOP_N=100
 FILTER_STRING=""
 LOG_FILES=()
@@ -39,6 +42,10 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --all)
             USE_ALL=true
+            shift
+            ;;
+        --combine)
+            USE_COMBINE=true
             shift
             ;;
         -n|--top)
@@ -51,7 +58,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         *)
             if [ -n "$FILTER_STRING" ]; then
-                echo "Usage: $0 [--all] [-n N | --top N] [filter_string]"
+                echo "Usage: $0 [--all] [--combine] [-n N | --top N] [filter_string]"
                 exit 1
             fi
             FILTER_STRING="$1"
@@ -71,7 +78,7 @@ resolve_log_files() {
     if [ "$USE_ALL" = true ]; then
         while IFS= read -r match; do
             [ -f "$match" ] && LOG_FILES+=("$match")
-        done < <(compgen -G "./access.log*" || true)
+        done < <(compgen -G "./access.log*" | sort -V || true)
 
         if [ "${#LOG_FILES[@]}" -eq 0 ]; then
             echo "Error: no files matched ./access.log*"
@@ -137,17 +144,102 @@ resolve_log_files
 printf "%6s %-20s %s\n" "COUNT" "REMOTE IP" "HOSTNAME"
 printf "%6s %-20s %s\n" "-----" "---------" "--------"
 
-zcat -f -- "${LOG_FILES[@]}" \
-    | awk -v filter="$FILTER_STRING" '
-        filter == "" || index($0, filter) > 0 {
-            print $1
+if [ "$USE_COMBINE" = true ]; then
+    TMP_COMBINE=$(mktemp)
+    TMP_STDERR=$(mktemp)
+    # Run pipeline first; set trap after so the pipeline's subshell doesn't inherit it.
+    set +e
+    zcat -f -- "${LOG_FILES[@]}" 2>"$TMP_STDERR" \
+        | awk -v filter="$FILTER_STRING" '
+            filter == "" || index($0, filter) > 0 {
+                print $1
+            }
+        ' \
+        | sort \
+        | uniq -c \
+        | sort -nr \
+        | head -n "$TOP_N" \
+        | while read -r count ip; do
+            [ -n "${ip:-}" ] || continue
+            printf "%s\t%s\t%s\n" "$count" "$ip" "$(resolve_hostname "$ip")"
+        done > "$TMP_COMBINE"
+    pipe_exit=$?
+    set -e
+    trap 'rm -f "$TMP_COMBINE" "$TMP_STDERR"' EXIT
+    # Exit 141 (SIGPIPE) is normal when head closes the pipe after TOP_N lines; we still got the data.
+    if [ "$pipe_exit" -ne 0 ] && [ "$pipe_exit" -ne 141 ]; then
+        echo "Error: failed to process log files (exit $pipe_exit)." >&2
+        [ -s "$TMP_STDERR" ] && cat "$TMP_STDERR" >&2
+        exit 1
+    fi
+    if [ ! -s "$TMP_COMBINE" ]; then
+        echo "Error: no log entries found." >&2
+        exit 1
+    fi
+
+    # Combine only when multiple entries share the same key; singles show full IP and hostname.
+    # Combined domain groups: show NA for IP, combined label (x.example.com) for hostname.
+    # Combined IP groups: show combined label (192.168.0.x) for IP, NA for hostname.
+    cat "$TMP_COMBINE" | awk -F'\t' '
+        NF >= 2 {
+            count = $1 + 0
+            ip = $2
+            hostname = (NF >= 3) ? $3 : "-"
+            if (hostname == "-" || hostname == "-TIMEOUT-") {
+                if (match(ip, /^[0-9]+\.[0-9]+\.[0-9]+/)) {
+                    key = substr(ip, RSTART, RLENGTH) ".x"
+                    is_domain_key = 0
+                } else {
+                    key = ip
+                    is_domain_key = 0
+                }
+            } else {
+                n = split(hostname, a, ".")
+                if (n >= 2) {
+                    key = "x." a[n-1] "." a[n]
+                    is_domain_key = 1
+                } else {
+                    key = hostname
+                    is_domain_key = 1
+                }
+            }
+            sum[key] += count
+            n_sources[key]++
+            if (n_sources[key] == 1) {
+                first_ip[key] = ip
+                first_host[key] = hostname
+                key_is_domain[key] = is_domain_key
+            }
         }
-    ' \
-    | sort \
-    | uniq -c \
-    | sort -nr \
-    | head -n "$TOP_N" \
-    | while read -r count ip; do
-        [ -n "${ip:-}" ] || continue
-        printf "%6s %-20s %s\n" "$count" "$ip" "$(resolve_hostname "$ip")"
+        END {
+            for (k in sum) {
+                if (n_sources[k] > 1) {
+                    if (key_is_domain[k]) {
+                        print sum[k] "\tNA\t" k
+                    } else {
+                        print sum[k] "\t" k "\tNA"
+                    }
+                } else {
+                    print sum[k] "\t" first_ip[k] "\t" first_host[k]
+                }
+            }
+        }
+    ' | sort -nr -k1,1 | while IFS=$'\t' read -r count ip_col host_col; do
+        printf "%6s %-20s %s\n" "$count" "${ip_col:-}" "${host_col:-}"
     done
+else
+    zcat -f -- "${LOG_FILES[@]}" \
+        | awk -v filter="$FILTER_STRING" '
+            filter == "" || index($0, filter) > 0 {
+                print $1
+            }
+        ' \
+        | sort \
+        | uniq -c \
+        | sort -nr \
+        | head -n "$TOP_N" \
+        | while read -r count ip; do
+            [ -n "${ip:-}" ] || continue
+            printf "%6s %-20s %s\n" "$count" "$ip" "$(resolve_hostname "$ip")"
+        done
+fi

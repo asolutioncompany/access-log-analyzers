@@ -13,7 +13,7 @@ Shows the top N remote hosts by request count from the access log, with reverse 
 ### Usage
 
 ```text
-./access-top [--all] [-n N | --top N] [filter_string]
+./access-top [--all] [--combine] [-n N | --top N] [filter_string]
 ```
 
 ### Options
@@ -21,6 +21,7 @@ Shows the top N remote hosts by request count from the access log, with reverse 
 | Option | Description |
 |--------|-------------|
 | `--all` | Include all rotated logs matching `./access.log*` (including `.gz`). Default is only `./access.log`. |
+| `--combine` | Group resolved domains by last two parts (e.g. `x.example.com`) and unresolved IPs by first three octets (e.g. `192.168.0.x`). |
 | `-n N` / `--top N` | Show at most N top remote hosts (default: 100). |
 | `filter_string` | Optional. Only count log lines that contain this string. |
 
@@ -30,6 +31,7 @@ Shows the top N remote hosts by request count from the access log, with reverse 
 ./access-top
 ./access-top -n 50
 ./access-top --all
+./access-top --all --combine
 ./access-top "bot"
 ./access-top --all -n 200 "/wp-login.php"
 ```
