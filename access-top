@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+# Copyright (C) 2026 Keith Gardner, aSolution.company
+# Website: https://asolution.company/
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# access-top
+# Show the top 100 remote hosts from ./access.log, including reverse DNS hostname.
+# Use --all to include rotated access.log files, including .gz files.
+# Optionally filter to only log lines containing a given string.
+# Usage: ./access-top [--all] [filter_string]
+# Example: ./access-top
+# Example: ./access-top --all
+# Example: ./access-top "Googlebot"
+# Example: ./access-top --all "/wp-login.php"
+
+set -euo pipefail
+
+ACCESS_LOG="./access.log"
+USE_ALL=false
+FILTER_STRING=""
+LOG_FILES=()
+
+if [ "${1:-}" = "--all" ]; then
+    USE_ALL=true
+    shift
+fi
+
+if [ "$#" -gt 1 ]; then
+    echo "Usage: $0 [--all] [filter_string]"
+    echo "Example: $0"
+    echo "Example: $0 --all"
+    echo "Example: $0 --all \"/wp-login.php\""
+    exit 1
+fi
+
+FILTER_STRING="${1:-}"
+
+resolve_log_files() {
+    local match=""
+
+    if [ "$USE_ALL" = true ]; then
+        while IFS= read -r match; do
+            [ -f "$match" ] && LOG_FILES+=("$match")
+        done < <(compgen -G "./access.log*" || true)
+
+        if [ "${#LOG_FILES[@]}" -eq 0 ]; then
+            echo "Error: no files matched ./access.log*"
+            echo "Run this script from the directory containing the access logs."
+            exit 1
+        fi
+    else
+        if [ ! -f "$ACCESS_LOG" ]; then
+            echo "Error: access log not found at $ACCESS_LOG"
+            echo "Run this script from the directory containing access.log."
+            exit 1
+        fi
+
+        LOG_FILES=("$ACCESS_LOG")
+    fi
+}
+
+resolve_hostname() {
+    local ip="$1"
+    local host_name=""
+
+    if command -v host >/dev/null 2>&1; then
+        host_name=$(host "$ip" 2>/dev/null | awk -F' pointer ' '/domain name pointer/ {sub(/\.$/, "", $2); print $2; exit}')
+    fi
+
+    if [ -z "$host_name" ] && command -v dig >/dev/null 2>&1; then
+        host_name=$(dig +short -x "$ip" 2>/dev/null | awk 'NF {sub(/\.$/, "", $0); print; exit}')
+    fi
+
+    if [ -z "$host_name" ]; then
+        host_name="-"
+    fi
+
+    echo "$host_name"
+}
+
+resolve_log_files
+
+printf "%6s %-20s %s\n" "COUNT" "REMOTE IP" "HOSTNAME"
+printf "%6s %-20s %s\n" "-----" "---------" "--------"
+
+zcat -f -- "${LOG_FILES[@]}" \
+    | awk -v filter="$FILTER_STRING" '
+        filter == "" || index($0, filter) > 0 {
+            print $1
+        }
+    ' \
+    | sort \
+    | uniq -c \
+    | sort -nr \
+    | head -100 \
+    | while read -r count ip; do
+        [ -n "${ip:-}" ] || continue
+        printf "%6s %-20s %s\n" "$count" "$ip" "$(resolve_hostname "$ip")"
+    done

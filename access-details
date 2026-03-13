@@ -1,0 +1,166 @@
+#!/bin/bash
+#
+# Copyright (C) 2026 Keith Gardner, aSolution.company
+# Website: https://asolution.company/
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# access-details
+# Show up to 100 of the most recent access-log entries matching a text string.
+# Matches only against the raw log line and outputs date/time, user agent, URL,
+# response code, remote IP, and resolved hostname.
+# Reads from ./access.log by default, or all rotated access.log files with --all.
+# Usage: ./access-details [--all] <match_string>
+# Example: ./access-details 203.0.113.10
+# Example: ./access-details semantic-visions
+# Example: ./access-details --all semantic
+
+set -euo pipefail
+
+ACCESS_LOG="./access.log"
+USE_ALL=false
+MATCH_STRING=""
+LOG_FILES=()
+
+if [ "${1:-}" = "--all" ]; then
+    USE_ALL=true
+    shift
+fi
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 [--all] <match_string>"
+    echo "Example: $0 203.0.113.10"
+    echo "Example: $0 semantic-visions"
+    echo "Example: $0 --all semantic"
+    exit 1
+fi
+
+MATCH_STRING="$1"
+
+resolve_log_files() {
+    local match=""
+
+    if [ "$USE_ALL" = true ]; then
+        while IFS= read -r match; do
+            [ -f "$match" ] && LOG_FILES+=("$match")
+        done < <(compgen -G "./access.log*" | sort -V -r || true)
+
+        if [ "${#LOG_FILES[@]}" -eq 0 ]; then
+            echo "Error: no files matched ./access.log*"
+            echo "Run this script from the directory containing the access logs."
+            exit 1
+        fi
+    else
+        if [ ! -f "$ACCESS_LOG" ]; then
+            echo "Error: access log not found at $ACCESS_LOG"
+            echo "Run this script from the directory containing access.log."
+            exit 1
+        fi
+
+        LOG_FILES=("$ACCESS_LOG")
+    fi
+}
+
+resolve_hostname() {
+    local ip="$1"
+    local host_name=""
+
+    if command -v host >/dev/null 2>&1; then
+        host_name=$(host "$ip" 2>/dev/null | awk -F' pointer ' '/domain name pointer/ {sub(/\.$/, "", $2); print $2; exit}')
+    fi
+
+    if [ -z "$host_name" ] && command -v dig >/dev/null 2>&1; then
+        host_name=$(dig +short -x "$ip" 2>/dev/null | awk 'NF {sub(/\.$/, "", $0); print; exit}')
+    fi
+
+    if [ -z "$host_name" ]; then
+        host_name="-"
+    fi
+
+    echo "$host_name"
+}
+
+parse_line() {
+    local line="$1"
+
+    awk '
+        {
+            if (match($0, /\[([^][]+)\]/, dt) == 0) {
+                next
+            }
+
+            split($0, quoted, "\"")
+
+            request = quoted[2]
+            meta = quoted[3]
+            agent = quoted[length(quoted) - 1]
+
+            gsub(/^ +/, "", meta)
+            split(meta, meta_fields, " ")
+            status = meta_fields[1]
+
+            split(request, request_fields, " ")
+            url = request_fields[2]
+
+            if (url == "") {
+                url = request
+            }
+
+            if (agent == "") {
+                agent = "-"
+            }
+
+            printf "%s\t%s\t%s\t%s\t%s\n", dt[1], status, $1, url, agent
+        }
+    ' <<< "$line"
+}
+
+resolve_log_files
+TMP_DIR=$(mktemp -d)
+RAW_MATCHES_FILE="$TMP_DIR/raw-matches.log"
+HOST_CACHE_FILE="$TMP_DIR/host-cache.tsv"
+FINAL_MATCHES_FILE="$TMP_DIR/final-matches.tsv"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+for log_file in "${LOG_FILES[@]}"; do
+    zcat -f -- "$log_file"
+done | awk -v match_text="$MATCH_STRING" 'index($0, match_text) > 0' > "$RAW_MATCHES_FILE"
+
+while IFS= read -r remote_ip; do
+    [ -n "$remote_ip" ] || continue
+    printf "%s\t%s\n" "$remote_ip" "$(resolve_hostname "$remote_ip")"
+done < <(awk '{print $1}' "$RAW_MATCHES_FILE" | sort -u) > "$HOST_CACHE_FILE"
+
+awk 'FNR==NR { host[$1] = $2; next } { print $0 "\t" host[$1] }' "$HOST_CACHE_FILE" "$RAW_MATCHES_FILE" \
+    | tail -100 \
+    | while IFS=$'\t' read -r line host_name; do
+        parsed_line="$(parse_line "$line")"
+        [ -n "$parsed_line" ] || continue
+        printf "%s\t%s\n" "$parsed_line" "${host_name:--}"
+    done > "$FINAL_MATCHES_FILE"
+
+printf "[ %s ] [ %s ] [ %s ] [ %s ] [ %s ] [ %s ]\n" \
+    "DATE/TIME" "STATUS" "REMOTE IP" "HOST NAME" "URL" "USER AGENT"
+
+while IFS=$'\t' read -r date_time status remote_ip url agent host_name; do
+    [ -n "${date_time:-}" ] || continue
+        printf "[ %s ] [ %s ] [ %s ] [ %s ] [ %s ] [ %s ]\n" \
+            "$date_time" \
+            "$status" \
+            "$remote_ip" \
+            "$host_name" \
+            "$url" \
+            "$agent"
+done < "$FINAL_MATCHES_FILE"
